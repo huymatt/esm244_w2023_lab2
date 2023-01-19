@@ -1,0 +1,198 @@
+---
+title: "Lab 2"
+author: "Matthieu Huy"
+date: "2023-01-19"
+output: html_document
+---
+
+```{r setup, echo = TRUE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(palmerpenguins)
+library(AICcmodavg)
+library(equatiomatic)
+```
+
+# Predicting Penguin Mass
+
+We want to create a model we can use in the field to quickly and easily estimate a penguin’s mass, based on the subset of data in the palmerpenguins package.
+
+```{r}
+penguins_clean <- penguins %>% 
+  drop_na() %>%  #drop any na values in data frame
+  rename(mass = body_mass_g, #rename columns in data frame
+         bill_l = bill_length_mm,
+         bill_d = bill_depth_mm,
+         flip_l = flipper_length_mm)
+
+#linear regression: mass as a function of ...
+mdl1 <- lm(mass ~ bill_l + bill_d + flip_l + species + sex + island, 
+           data = penguins_clean) #specify data frame from regression
+#summary(mdl1); AIC(mdl1) #view results of regression and A, do in console
+
+#Akaike Information Criterion (AIC): 4727.242
+
+#reference for species: Adelie penguin
+#reference sex: female
+#reference island: Biscoe
+```
+
+```{r}
+f1 <- mass ~ bill_l + bill_d + flip_l + species + sex + island 
+#create function
+mdl1 <-  lm(f1, data = penguins_clean)
+
+f2 <- mass ~ bill_l + bill_d + flip_l + species + sex #drop island, less significant
+mdl2 <-  lm(f2, data = penguins_clean)
+#summary(mdl2); AIC(mdl2) in console
+
+#AIC: 4723.938, slightly lower than mdl 1, better
+```
+
+```{r}
+f3 <- mass ~ bill_d + flip_l + species + sex #drop bill_l, less significant
+mdl3 <-  lm(f3, data = penguins_clean)
+#summary(mdl3); AIC(mdl3) in console
+
+#AIC: 4728.575, slightly higher
+```
+
+These models all look pretty good! All the adjusted R2 indicate that any of these models explains around 87% of the observed variance. Benefits and drawbacks to each?\
+
+Let’s compare these models using AIC: Akaike Information Criteria - calculated from:\
+
+- the number of independent variables included in the model\
+- the degree to which the model fits the data\
+
+AIC identifies the model that maximizes the likelihood of those parameter values given these data, using the fewest possible independent variables - penalizes overly complex models. A lower score is better; a difference of 2 indicates a significant difference in model fit.\
+
+```{r}
+AIC(mdl1, mdl2, mdl3)
+BIC(mdl1, mdl2, mdl3) #penalizes # of variables more
+
+AICcmodavg::AICc(mdl1) #corrected AIC
+AICcmodavg::aictab(list(mdl1, mdl2, mdl3))
+bictab(list(mdl1, mdl2, mdl3))
+```
+Delta_AICc is positive, meaning models are worse. AIC(mdl1) - AIC(mdl2)
+
+From this we can see the second model is “best” by dropping info about the island (which requires 2 parameters!). However, the first model, even with the penalty, is slightly better (though not significantly!) than model 3.
+
+But: this model is based on how well it fits the existing data set. We want a model that will perform well in predicting data outside of the dataset used to create the model! Here we will use a common tool in supervised machine learning - separating our data into a training dataset, to tune the parameters of the competing models, and a testing dataset to see how how well the models predict unseen data.
+
+# Compare Models using k-fold cross validation
+
+```{r}
+folds <- 10 #split data into 10 "chunks" 
+#generate model using 9/10ths of the data, test the model on one chunk
+#repeat for all 10 chunks
+fold_vec <- rep(1: folds, #create vectors 1-10
+                length.out = nrow(penguins_clean)) #length of vector 
+
+set.seed(42) #good idea for random numbers or sampling
+
+penguins_fold <- penguins_clean %>% 
+  mutate(group = sample(fold_vec, size = n(), replace = FALSE)) 
+#create new column, group, pull from 333 instances of 1-10 fold_vec and randomly assign each penguins data point
+table(penguins_fold$group) #should be same size
+
+test_df <- penguins_fold %>% 
+  filter(group == 1) #select only group 1 as test group
+
+train_df <- penguins_fold %>% 
+  filter(group != 1) #remaining 9/10ths of data frame
+```
+
+## Writing a new function
+
+```{r}
+#calc_mean <- function(x) { #create new function that takes input x
+  #m <- sum(x) / length(x)} code for new function is within {}
+
+calc_rmse <- function(x, y) { #create function to calc root mean squared error
+  rmse <- (x - y)^2 %>% #square of error/differences
+    mean() %>% #take average of rmse
+    sqrt() #take square root of that average
+  return(rmse)
+  }
+```
+
+```{r}
+training_mdl1 <- lm(f1, data = train_df)
+#summary(training_mdl1)
+
+training_mdl2 <- lm(f2, data = train_df)
+#summary(training_mdl1)
+
+training_mdl3 <- lm(f3, data = train_df)
+#summary(training_mdl1)
+
+#use these models to predict the mass of penguins in our testing dataset, then use our RMSE function to see how well the predictions went.
+
+predict_test <- test_df %>% 
+  mutate(model1 = predict(training_mdl1, test_df), #use training_mdl to predict test_df
+         model2 = predict(training_mdl2, test_df),
+         model3 = predict(training_mdl3, test_df))
+
+#error is difference, model1 - mass 
+#take sqrt(mean(model - mass)^2))
+
+rmse_predict_test <- predict_test %>% 
+  summarize(rmse_mdl1 = calc_rmse(model1, mass),
+            rmse_mdl2 = calc_rmse(model2, mass),
+            rmse_mdl3 = calc_rmse(model3, mass))
+
+#model 2 has lowest RMSE, agrees with our AIC/BIC comparison
+```
+
+```{r}
+rmse_df <- data.frame() #create empty data frame
+
+for(i in 1:folds) {
+  ### i <- 1
+  kfold_test_df <- penguins_fold %>% 
+    filter(group == i) #i is changing each time it is run, i = group 1, i = group 2...
+  kfold_train_df <- penguins_fold %>% 
+    filter(group != i)
+  #create model from each training data set
+  kfold_mdl1 <- lm(f1, data = kfold_train_df)
+  kfold_mdl2 <- lm(f2, data = kfold_train_df)
+  kfold_mdl3 <- lm(f3, data = kfold_train_df)
+  
+  kfold_pred_df <- kfold_test_df %>%
+    mutate(mdl1 = predict(kfold_mdl1, kfold_test_df), #use kmdl1 to predict mass based on df
+           mdl2 = predict(kfold_mdl2, .), #use '.' to indicate piped object (kfold_test_df)
+           mdl3 = predict(kfold_mdl3, .))
+  kfold_rmse <- kfold_pred_df %>%
+    summarize(rmse_mdl1 = calc_rmse(mdl1, mass), 
+              rmse_mdl2 = calc_rmse(mdl2, mass),
+              rmse_mdl3 = calc_rmse(mdl3, mass),
+              test_gp = i) #test group = 1
+  
+  rmse_df <- bind_rows(rmse_df, kfold_rmse) #add results of kfold_rmse_df
+}
+
+rmse_df %>% 
+  summarize(mean_rmse_mdl1 = mean(rmse_mdl1), #take mean of rmse_mdl1 column
+            mean_rmse_mdl2 = mean(rmse_mdl2), #take mean of rmse_mdl2 column
+            mean_rmse_mdl3 = mean(rmse_mdl3)) #take mean of rmse_mdl3 column
+
+#summarize shows results in a table, model 2 < model 3 < model 1
+```
+
+# Finalize the model
+
+We will use the entire dataset, rather than testing/training sets, to identify the coefficients for the final predictive model, based on model 2. 
+
+```{r}
+final_mdl <- lm(f2, data = penguins_clean)
+summary(final_mdl)
+```
+
+Our Final model:
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE)`
+
+And with coefficiencts in place:
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE, use_coeffs = TRUE)`
+
+
